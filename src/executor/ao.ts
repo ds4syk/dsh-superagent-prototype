@@ -171,12 +171,14 @@ export function requestFingerprint(input: FingerprintInput): string {
  * work is `working`, and an idle session waits for a Trigger.
  */
 export function mapAoExecution(execution: AoExecutionView): { state: AoBridgeState; reason: string } {
-  if (execution.needsPerson) return { state: 'blocked', reason: execution.waitingReason?.trim() || 'needsPerson' }
   const status = (execution.status ?? '').trim().toLowerCase()
   const activity = (execution.activity ?? '').trim().toLowerCase()
   const prs = execution.prs ?? []
+  // Terminal and PR state win over a stale needsPerson flag: a session that
+  // ends while AO still says a person is needed must not block forever.
   if (PR_READY.has(status)) return { state: 'ready', reason: status }
   if (TERMINATED.has(status) || execution.isTerminated) return { state: prs.length ? 'ready' : 'failed', reason: status || 'terminated' }
+  if (execution.needsPerson) return { state: 'blocked', reason: execution.waitingReason?.trim() || 'needsPerson' }
   if (ACTIVE.has(status) || activity === 'active') return { state: 'working', reason: status || activity }
   return { state: 'waiting', reason: status || activity || 'idle' }
 }
@@ -347,6 +349,9 @@ export class AoExecutor implements Executor {
         this.stopPoller(ref)
         const stale = this.record(ref)
         if (stale) this.save({ ...stale, reportedTerminal: 'failed', closedAt: this.now() })
+        // The conflicting session belongs to this assignment's earlier immutable
+        // request and would otherwise keep running with no poller.
+        this.track(this.requestStop(ref, 'immutable request changed'))
         throw new Error(`The Agent Orchestrator refused ${ref}: its immutable request changed (EXTERNAL_REF_CONFLICT). A different assignment or workspace prompt already used this reference; retry the Ticket under a new Assignment.`)
       }
       throw error
@@ -399,6 +404,10 @@ export class AoExecutor implements Executor {
           const current = this.host.store.tickets.get(ticketId)
           if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignment.id) return
           this.host.engine.deliveryFailed(ticketId, assignment.id, reason(error))
+          // TUI /send has no deduplication key. An ambiguous transport failure
+          // may already have reached AO, so retrying could inject the same input
+          // twice; accept at-most-once and leave the input failed instead.
+          if (record.mode === 'tui' && error instanceof AoHttpError && error.status === 0) return
           throw error
         }
       }
@@ -528,20 +537,28 @@ export class AoExecutor implements Executor {
     if (mapped.state === 'ready' || mapped.state === 'failed') { this.reportTerminal(next, mapped.state, this.summary(mapped, execution)); return }
     const revision = execution.revision ?? null
     if (next.lastKind === mapped.state && (revision === null || next.lastRevision === revision)) { this.save(next); return }
+    // Report before remembering the state. If the Engine is transiently
+    // unavailable, the next poll must retry instead of deduping the change
+    // away.
+    if (!this.report(next, mapped, execution)) return
     next.lastKind = mapped.state
     next.lastRevision = revision
     this.save(next)
-    this.report(next, mapped, execution)
   }
   /** Report one non-terminal state: `waiting` ends the turn, `working` is progress, `blocked` waits for a person. */
-  private report(record: AoSessionRecord, mapped: { state: AoBridgeState; reason: string }, execution: AoExecutionView): void {
-    if (mapped.state === 'waiting') {
-      this.host.engine.turnEnded(record.ticketId, record.assignmentId)
-      this.host.health.set({ state: 'ready', detail: `AO session ${record.externalRef} waits`, at: this.now() })
-      return
+  private report(record: AoSessionRecord, mapped: { state: AoBridgeState; reason: string }, execution: AoExecutionView): boolean {
+    try {
+      if (mapped.state === 'waiting') {
+        this.host.engine.turnEnded(record.ticketId, record.assignmentId)
+        this.host.health.set({ state: 'ready', detail: `AO session ${record.externalRef} waits`, at: this.now() })
+        return true
+      }
+      const state: WorkerReport['state'] = mapped.state === 'working' ? 'progress' : 'blocked'
+      return this.recordReport(record, { state, summary: this.summary(mapped, execution) }) === 'reported'
+    } catch (error) {
+      this.host.health.set({ state: 'error', detail: `AO report of ${record.externalRef} failed: ${reason(error)}`, at: this.now() })
+      return false
     }
-    const state: WorkerReport['state'] = mapped.state === 'working' ? 'progress' : 'blocked'
-    this.recordReport(record, { state, summary: this.summary(mapped, execution) })
   }
   /** Report a terminal state once and stop its poller; a 404 and an ended session share this path. */
   private reportTerminal(record: AoSessionRecord, state: 'ready' | 'failed', summary: string): void {

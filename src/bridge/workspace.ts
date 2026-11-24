@@ -98,7 +98,10 @@ export function repoKey(value: string): string | undefined {
 function hostPathKey(host: string, path: string): string | undefined {
   const parts = path.replace(/^\/+/, '').replace(/\.git$/i, '').replace(/\/+$/, '').split('/').filter(Boolean)
   if (!parts.length || !host) return undefined
-  return `${host.toLowerCase()}/${parts.slice(0, 2).join('/').toLowerCase()}`
+  // Keep the full path: org/team nesting and GitLab subgroups make the first
+  // two segments ambiguous, and a wrong repo key would route a Ticket to the
+  // wrong workspace.
+  return `${host.toLowerCase()}/${parts.join('/').toLowerCase()}`
 }
 /** Whether two repository namings identify the same repository. */
 export function sameRepo(left: string, right: string): boolean {

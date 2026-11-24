@@ -160,6 +160,8 @@ describe('AO execution contract', () => {
       ['a ready pull request', { status: 'approved', activity: 'idle', prs: [{ url: 'p' }] }, 'ready'],
       ['a terminated session with a pull request', { status: 'terminated', activity: 'exited', isTerminated: true, prs: [{ url: 'p' }] }, 'ready'],
       ['a terminated session without a pull request', { status: 'terminated', activity: 'exited', isTerminated: true, prs: [] }, 'failed'],
+      ['a terminated session with a stale person question', { status: 'terminated', activity: 'exited', isTerminated: true, needsPerson: true, waitingReason: 'question', prs: [] }, 'failed'],
+      ['a terminated session with a pull request and a stale question', { status: 'terminated', activity: 'exited', isTerminated: true, needsPerson: true, waitingReason: 'question', prs: [{ url: 'p' }] }, 'ready'],
       ['a failing check run on an active session', { status: 'working', activity: 'active', needsPerson: false, prs: [{ url: 'p', ci: 'failure' }] }, 'working'],
       ['a CI failure status with no person needed', { status: 'ci_failed', activity: 'active', needsPerson: false, prs: [{ url: 'p' }] }, 'working'],
       ['an idle CI failure status', { status: 'ci_failed', activity: 'idle', needsPerson: false, prs: [{ url: 'p' }] }, 'waiting'],
@@ -226,6 +228,21 @@ describe('AoExecutor', () => {
     expect(h.reports.at(-1)).toMatchObject({ ticketId: ticket.id, report: { state: 'failed',
       summary: expect.stringContaining('EXTERNAL_REF_CONFLICT') } })
     expect(h.executor.activeCount()).toBe(0)
+    await vi.waitFor(() => expect(h.fake.state.stops.some(stop => stop.externalRef === externalRef(ticket.id, ticket.assignments[0]!.id))).toBe(true))
+  })
+
+  it('retries a non-terminal report whose Engine write failed instead of deduping it away', async () => {
+    const h = await harness()
+    const ticket = seed(h)
+    const assignment = ticket.assignments[0]!
+    h.executor.start(ticket, assignment); await h.effects.idle()
+    const ref = externalRef(ticket.id, assignment.id)
+    h.fake.state.execution = { ...h.fake.state.execution, status: 'working', activity: 'active', revision: 1 }
+    h.engine.report.mockImplementationOnce(() => { throw new Error('transient Engine failure') })
+    await h.executor.pollOnce(ref)
+    expect(h.reports).toHaveLength(0)
+    await h.executor.pollOnce(ref)
+    expect(h.reports.map(item => item.report.state)).toEqual(['progress'])
   })
 
   it('delivers each waiting Input once with its id as the AO deduplication key, in chat and TUI mode', async () => {

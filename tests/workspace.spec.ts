@@ -38,6 +38,8 @@ describe('repoKey', () => {
       expect(repoKey(value)).toBe('github.com/acme/widgets')
     }
     expect(repoKey('https://gitlab.com/acme/widgets')).toBe('gitlab.com/acme/widgets')
+    expect(repoKey('https://gitlab.com/team/app/service-a')).toBe('gitlab.com/team/app/service-a')
+    expect(repoKey('https://gitlab.com/team/app/service-b')).toBe('gitlab.com/team/app/service-b')
     expect(repoKey('file:///srv/fourcolor')).toBeUndefined()
     expect(repoKey('')).toBeUndefined()
   })
