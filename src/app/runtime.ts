@@ -21,6 +21,9 @@ import type { Deployment, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
+import { AoExecutor } from '../executor/ao.ts'
+import type { ExecutorRuntime } from '../executor/runtime.ts'
+import { WorkspaceBridge } from '../bridge/workspace.ts'
 import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
@@ -65,7 +68,7 @@ export class Runtime extends Service implements SourceHost {
   readonly commands: Commands
   readonly sessions: Sessions
   readonly settings: Settings
-  readonly executor: DshExecutor
+  readonly executor: ExecutorRuntime
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
   readonly engine: Engine
@@ -125,9 +128,21 @@ export class Runtime extends Service implements SourceHost {
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
-        lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+      const workerHealth = board.claim('worker')
+      if (machine.executor === 'ao' && !machine.aoRegistryFile) {
+        throw new Error('The AO Executor needs an aoRegistryFile naming its workspace registry')
+      }
+      if (machine.executor === 'ao') {
+        // AO sessions live on remote servers; the bridge owns their registry and polling, not a local worker Session.
+        this.executor = new AoExecutor({ get engine() { return runtime.engine }, store, effects, health: workerHealth, machine,
+          bridge: WorkspaceBridge.fromFile(machine.aoRegistryFile!), lifetime: this.lifetime, closing: () => this.closing(),
+          paused: () => this.paused(), sourceRepo: () => setup.configured() ? setup.deployment.repository : undefined,
+          relay: message => sessions.relay(message.id, message.text) })
+      } else {
+        this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: workerHealth, machine,
+          lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
+          repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+      }
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
@@ -212,6 +227,9 @@ export class Runtime extends Service implements SourceHost {
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return
     this.executor.resume()
+    // An Executor whose Sessions live elsewhere reads them back before passes and effects start; a terminal state that a
+    // previous process did not report is reported now, exactly once.
+    await this.executor.reconcile?.()
     this.passes.start()
     this.effects.start()
     this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })

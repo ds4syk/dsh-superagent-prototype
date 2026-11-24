@@ -20,6 +20,10 @@ export const Config = s.object({
     .description('Pages of thread context one assessment may read.').volatile(),
   admissionContextTimeoutMs: s.number().min(LIMITS.admissionContextTimeoutMs.min).max(LIMITS.admissionContextTimeoutMs.max).step(1)
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
+  executor: s.union([s.const('dsh'), s.const('ao')]).default('dsh')
+    .description('Which Executor runs Assignments: `dsh` keeps one DeepSeek Harness Session per Ticket (the default); `ao` runs one Agent Orchestrator session per Assignment.'),
+  aoRegistryFile: s.string().pattern(/^(?:\/.*)?$/).default('')
+    .description('Absolute path to the Agent Orchestrator workspace registry JSON; required when `executor` is `ao`.'),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
@@ -27,6 +31,10 @@ export interface Machine {
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
+  /** Which Executor runs Assignments; deployments that predate AO resolve to `dsh`. */
+  executor: 'dsh' | 'ao'
+  /** Absolute path to the AO workspace registry, when `executor` is `ao`. */
+  aoRegistryFile?: string
 }
 const MOVED: Record<string, string> = {
   repository: 'on the GitHub Source', branchPrefix: 'in the prepare command of the Execution settings', github: 'on the GitHub Source',
@@ -38,8 +46,12 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, executor, aoRegistryFile } = config
+  if (executor === 'ao' && !aoRegistryFile) {
+    throw new Error('dsh-superagent configuration selects the AO Executor but names no aoRegistryFile: give the absolute path of the Agent Orchestrator workspace registry JSON')
+  }
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, executor,
+    ...(aoRegistryFile ? { aoRegistryFile } : {}) }
 }
 
 export const GithubAccountsSchema = z.object({

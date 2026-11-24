@@ -10,7 +10,8 @@ import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { Runtime } from '../src/app/runtime.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
-import { mandateInstructions } from '../src/executor/dsh.ts'
+import { DshExecutor, mandateInstructions } from '../src/executor/dsh.ts'
+import { AoExecutor } from '../src/executor/ao.ts'
 import { masterPrompt } from '../src/app/context.ts'
 import { reference, testMachine } from './fixtures/deployment.ts'
 import type { Machine } from '../src/deployment.ts'
@@ -1793,4 +1794,14 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   await runtime.settings.save('policy', { ...saved.policy, rules: rules.map(rule => ({ ...rule, enabled: false })) }, runtime.store.blockRevision('policy'), 'panel')
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
+})
+
+it('selects the local Executor by default and the AO Executor when the deployment config names it', async () => {
+  expect(runtime.executor).toBeInstanceOf(DshExecutor)
+  const registry = join(directory, 'ao-workspaces.json')
+  writeFileSync(registry, JSON.stringify({ workspaces: [{ ref: 'widgets', repoUrl: 'acme/widgets', projectId: 'widgets', aoBaseUrl: 'http://127.0.0.1:9' }] }))
+  runtime = await restart({ executor: 'ao', aoRegistryFile: registry })
+  await runtime.ready
+  expect(runtime.executor).toBeInstanceOf(AoExecutor)
+  expect(runtime.executor.activeCount()).toBe(0)
 })

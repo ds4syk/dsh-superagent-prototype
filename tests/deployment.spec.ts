@@ -46,9 +46,13 @@ describe('configuration schema', () => {
     // Limits are volatile references that the loader updates in place and callers read when used.
     expect({ ...read, promptMaxChars: read.promptMaxChars.get(), admissionContextMaxPages: read.admissionContextMaxPages.get(),
       admissionContextTimeoutMs: read.admissionContextTimeoutMs.get() })
-      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
+      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000, executor: 'dsh' })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+    // Selecting AO requires the registry it resolves workspaces from; the default stays the local Executor.
+    expect(() => machineOf(Config(minimal({ executor: 'ao' })))).toThrow('aoRegistryFile')
+    expect(machineOf(Config(minimal({ executor: 'ao', aoRegistryFile: join(dir, 'ao.json') }))))
+      .toMatchObject({ executor: 'ao', aoRegistryFile: join(dir, 'ao.json') })
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })

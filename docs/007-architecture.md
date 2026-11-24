@@ -15,7 +15,7 @@ flowchart TB
   engine -->|Policy| policy[Policy]
   engine -->|SourceScope| registry[SourceRegistry]
   engine -->|Assessor| assessor[MasterAssessor]
-  engine -->|Executor| executor[DshExecutor]
+  engine -->|Executor| executor[DshExecutor / AoExecutor]
   assessor -->|decide| engine
   engine -->|Outbox| outbox[Outbox]
   executor -->|assignmentStarted, inputsDelivered, report| engine
@@ -206,6 +206,14 @@ Transient provider and network failures get three retries. Launches use effect b
 
 `install` subscribes to Session events; `dispose` unsubscribes. A turn end normally reports waiting, except after readiness or while human action is required. Errors report failed. At startup, `resume` reports interrupted Assignments through `assignmentInterrupted` and requeues pending launches that do not wait for a person, oldest Ticket first.
 
+### AoExecutor and WorkspaceBridge
+
+`AoExecutor` (`src/executor/ao.ts`) implements the same `Executor` port and lifecycle (`src/executor/runtime.ts`) as `DshExecutor`, but owns no local Session. `start` and `deliver` queue the same durable `launch` and `delivery` effects. A launch resolves the Ticket's workspace through `WorkspaceBridge` (`src/bridge/workspace.ts`), then ensures one AO session with `PUT /api/v1/execution/sessions/{externalRef}`, where `externalRef` is `sa:<ticketId>:<assignmentId>`. The request carries an immutable fingerprint (SHA-256 of the project, harness, model, mode, branch, prompt and display name); AO answers `201` on creation and `200` on an idempotent replay, and `409 EXTERNAL_REF_CONFLICT` when the fingerprint changed. The mapping (`sessionId`, fingerprint, last revision and kind, terminal report, pending stop) is a `KV.bridge.aoSession` record, so a restart can reattach.
+
+A per-Assignment poller reads the derived execution view and maps it once per `(revision, kind)`: `needsPerson` is `blocked`, a ready pull request is `ready`, a terminated session without one is `failed`, active work is progress, and an idle session ends the turn as waiting. A terminal state is reported once and stops the poller. Delivery uses `POST /api/v1/sessions/{sessionId}/conversation/messages` with the Input id as `clientMessageId` in chat mode, or `POST /api/v1/sessions/{sessionId}/send` in TUI mode, which has no deduplication key. `stop` asks AO to stop after the ending transaction commits; a repeated stop is one request, a 404 counts as already stopped, and an unconfirmed stop stays durable for `reconcile`.
+
+`WorkspaceBridge` resolves a Ticket's workspace in this order: its explicit `execution.workspaceRef` (set by an accept's `workspace`), a Thread `meta.workspaceRef` pin, the deployment's source repository, the only registered workspace, else a question for a person with the candidates. It never registers a repository itself: `aoRegistryFile` names one JSON document with the AO endpoints and per-project workspaces, and an unmatched repository is reported `blocked` rather than run in a guessed project.
+
 ### MasterAssessor
 
 `MasterAssessor` (`src/app/assessment.ts`) lets the main Session assess proactive candidates. `request` queues an assessment effect; `release` drops cached state when its Eval ends.
@@ -352,6 +360,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
+| `src/executor/ao.ts` | The AoExecutor, `AoClient`, `externalRef`, `requestFingerprint`, `assignmentPrompt` and `mapAoExecution` |
+| `src/executor/runtime.ts` | `ExecutorRuntime`, the lifecycle the selected Executor provides beyond the Engine's port |
+| `src/bridge/workspace.ts` | `Workspace`, `WorkspaceRegistry`, `WorkspaceBridge`, `resolveWorkspace` and the AO registry schema |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
@@ -424,6 +435,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
+| `tests/ao.spec.ts` | The AO Executor on a fake AO HTTP server: fingerprint, ensure and replay, conflict, delivery dedupe, state mapping and terminal dedupe, reconcile after restart, idempotent stop, and the workspace question |
+| `tests/workspace.spec.ts` | Workspace resolution priority, repository identity, registry validation and loading |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |
@@ -445,7 +458,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
-`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
+`tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `ao.ts`, a fake Agent Orchestrator server; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
 ## Persistence
 
@@ -476,6 +489,7 @@ A generated column is computed from its row's JSON and is empty outside its set,
 | Session prompt history | `session-prompts:<session id>` |
 | Source state | Read positions such as `github-cursor:<number>`, PR CI fingerprints and seen Feishu-topic messages; keys begin with the kind or `thread-` plus a Thread key |
 | Display names | `source-labels:<source id>` |
+| AO bridge | `bridge-ao-session:<externalRef>`: one Assignment's AO session id, fingerprint, last reported revision and kind, terminal report, and pending or confirmed stop; `bridge-ticket-workspace:<ticket id>`: an operator's explicit workspace for a Ticket |
 
 Dismissal is stored on its Decision. Input text is rendered from the Ticket when read, so neither needs a separate key-value record.
 
@@ -603,7 +617,7 @@ Most built-in instructions live in `prompts/*.md`, with one sentence per line jo
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir` is volatile. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+Every plugin configuration key except `stateDir`, `executor` and `aoRegistryFile` is volatile. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 
