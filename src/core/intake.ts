@@ -6,6 +6,8 @@ import { EnginePart, type EngineOptions } from './part.ts'
 import type { Tickets } from './tickets.ts'
 
 export type ReceiveResult = 'stored' | 'duplicate' | 'filtered'
+/** How recent a message must be to get a receipt reaction; older messages, such as history backfill, stay quiet. */
+export const RECEIPT_WINDOW_MS = 5 * 60 * 1000
 
 /**
  * Ingests incoming triggers from Sources, deduplicating and filtering them against SourceScope before recording thread correlations.
@@ -57,7 +59,22 @@ export class Intake extends EnginePart {
     // Thread for context, and every bot's, goes to Eval.
     if (!this.owners(trigger).length) this.queueForEval(trigger)
     for (const ticketId of fanout) this.tickets.wake(ticketId)
+    // A reaction tells the sender the message arrived, before the slower Eval and text acknowledgement. Only a recent,
+    // admitted human message that addressed the agent or reached a Ticket on its own Thread earns one; the Outbox skips a
+    // Source that cannot react, and drops a receipt that went stale while waiting.
+    if (trigger.human && trigger.channel && this.receiptable(trigger, at, reached)) {
+      this.options.outbox.send({ id: key('receipt', trigger.id), channel: trigger.channel, text: '', kind: 'reaction', at: trigger.at })
+    }
     this.emit('trigger.received', { triggerId: trigger.id, threads: trigger.threads.map(threadKey) })
     return 'stored'
+  }
+  /** Whether a stored Trigger earns a receipt reaction: fresh, admitted, and addressed or reaching a Ticket on a non-context Thread. */
+  private receiptable(trigger: Trigger, at: string, reached: ReadonlyMap<string, { ticket: Ticket; context: boolean }>): boolean {
+    const age = Date.parse(at) - Date.parse(trigger.at)
+    // A message far in the future is a clock problem, not something to acknowledge.
+    if (!Number.isFinite(age) || age > RECEIPT_WINDOW_MS || age < -60_000) return false
+    const primary = this.thread(trigger.threads[0]!)
+    if (!this.policy().gate(trigger, primary, this.ticketsOnThread(primary)).admissible) return false
+    return trigger.addressed !== undefined || [...reached.values()].some(item => !item.context)
   }
 }

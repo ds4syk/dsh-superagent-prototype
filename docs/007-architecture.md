@@ -38,7 +38,7 @@ Shutdown cancels turns, waits for passes, effects and agents, restores the proce
 | --- | --- | --- |
 | Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
-| Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
+| Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect, or a receipt reaction's `receipt` effect, in one transaction. The handlers send a message through `SourceRegistry.send` or add a reaction through `SourceRegistry.react`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to; a receipt reaction is dropped when its Source cannot react or when it waited past its freshness window |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
 
 ### Engine
@@ -177,12 +177,13 @@ Failures retry with exponential backoff. Throwing `Later` defers work without co
 | `relay` | Sessions | Steers a worker's report or question, or a person's follow-up, into the main Session's turn | 1, in queue order | 2 s doubling to 60 s |
 | `notice` | Sessions | Injects a notice into the main Session without waking it | 1, in queue order | 2 s doubling to 60 s |
 | `reply` | Outbox | Sends a message for a Channel through its Source, after the earlier messages of its Ticket to its conversation that have not failed three times; withdrawing the message cancels it | 1, none while paused | 5 s doubling to 300 s; one whose Source is off, or behind an earlier message, tries again after 5 s |
+| `receipt` | Outbox | Adds the Source's receipt reaction to the message its receipt names, through `SourceRegistry.react`; a receipt that waited past the five-minute window is dropped rather than sent | 4, none while paused | 1 s doubling to 30 s; one whose Source is off tries again after 1 s |
 
 Each kind has a health entry under its name. It reports an error once one of its effects failed three times in a row, except `delivery`, whose failures show on their Ticket instead. Relays keep their order, and so do notices; a failed one holds back the later ones of its kind.
 
 ### Sources
 
-Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `link`), `threadContext`, `find`, `policy`, `environment` and `refreshLabels`.
+Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. A kind declares its identity, title, description, configuration `schema` and `fields`, derived `facts`, and `health` entries. Optional behavior includes `scope`, a `channel` (`allowed`, `send`, `react`, `link`), `threadContext`, `find`, `policy`, `environment` and `refreshLabels`.
 
 `SourceRegistry` (`registry.ts`) owns registered kinds and stored instances, and implements the Engine's `SourceScope`. Registration claims health entries on `HealthBoard`; duplicate claims and reserved `sync:` names are refused. A SourceContext writes only through its registration's claimed entries, so reports after unregistration do nothing.
 
@@ -324,7 +325,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
-| `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
+| `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts, the `reply` effects that send them, and the `receipt` effects that add receipt reactions |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
@@ -427,7 +428,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
 | `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |
-| `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed |
+| `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed; receipt reactions are sent fresh, dropped stale, and skipped for a Source that cannot react |
+| `tests/feishu-receipt.spec.ts` | The Feishu receipt reaction: the raw reaction API call, a withdrawn target, and a retryable failure |
 | `tests/cache.spec.ts` | `TextCache` |
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
@@ -473,7 +475,7 @@ One SQLite file, `<stateDir>/orchestrator.sqlite`, which only the Store opens.
 | `ticket` | Tickets with their Mandate, origin, execution, Assignments, Channels, Inputs and the Threads they follow; the generated columns `open`, set while it has not ended, and `active`, set while Inputs are undelivered or the latest Assignment is pending or running | Engine |
 | `decision` | Decisions, by Thread | Engine |
 | `effect` | The effect queue: per kind and key, the payload, its order, failed attempts with the last error, and when it is due | Effects; the schema 11 migration queues what earlier versions kept for the main Session |
-| `outbox` | The receipt of each message for a Channel, by id, with the Ticket it is for and its `status`, `pending`, `sent` or `dropped`, kept so an id is never queued twice; for a dropped message, when and why, as the generated column `dropped`, its time, and a reason code. A message that waits has a `reply` effect, which holds its attempts | The Outbox |
+| `outbox` | The receipt of each message or receipt reaction for a Channel, by id, with the Ticket it is for, its source event time, and its `status`, `pending`, `sent` or `dropped`, kept so an id is never queued twice; for a dropped one, when and why, as the generated column `dropped`, its time, and a reason code. A message that waits has a `reply` effect, a receipt reaction a `receipt` effect, which hold its attempts | The Outbox |
 | `kv` | Every other record, by key | The part that names it |
 
 A generated column is computed from its row's JSON and is empty outside its set, and each has an index over its set, so a pass reads only active work. A database that predates a column gets it when the Store opens it.

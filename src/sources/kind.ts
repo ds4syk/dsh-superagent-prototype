@@ -51,6 +51,11 @@ export interface SourceChannel<C> {
    * @throws when delivery failed but may succeed on a later retry.
    */
   send(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
+  /**
+   * Adds the Source's receipt reaction to the message `message.channel.address` names; returns `'gone'` when the target can no
+   * longer receive it, and throws when delivery failed but may succeed on a later retry. A kind without it gets no reaction.
+   */
+  react?(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'>
   /** Returns the URL and label for `address`; `url` is empty when `links` lack the required deployment info. */
   link(address: Record<string, string>, links: ChannelLinks): ChannelLink
 }

@@ -48,7 +48,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ### Feishu bot (optional)
 
-1. Create a self-built app with the bot capability. Grant it the permissions to receive message events, read and send chat messages, and read chat members, then publish the app version.
+1. Create a self-built app with the bot capability. Grant it the permissions to receive message events, read and send chat messages, read chat members, and add message reactions (`im:message.reactions:write_only`, for the receipt reaction), then publish the app version.
 2. Give the bot its own `lark-cli` configuration, restricted to the bot identity, and a wrapper:
 
    ```sh
