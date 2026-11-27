@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { FeishuBotSchema } from '../deployment.ts'
-import { feishuLink, sendFeishu } from './feishu-channel.ts'
+import { feishuLink, reactFeishu, sendFeishu } from './feishu-channel.ts'
 import { feishuThreadContext } from './feishu-read.ts'
 import { refreshChatNames, runFeishu } from './feishu-loops.ts'
 import { SOURCE, feishuTriggerId } from './feishu-trigger.ts'
@@ -61,7 +61,7 @@ export const feishuKind: SourceKind<FeishuConfig> = {
   channel: {
     allowed: (address, config) =>
       feishuKind.scope!({ meta: { chatId: address.chatId ?? '', direct: address.direct === 'true' } }, config).listened,
-    send: sendFeishu, link: feishuLink,
+    send: sendFeishu, react: reactFeishu, link: feishuLink,
   },
   threadContext: feishuThreadContext,
   find: query => ({ threads: [], terms: [...new Set(query.match(/om_[A-Za-z0-9_-]+/g) ?? [])] }),

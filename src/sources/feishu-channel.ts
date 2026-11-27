@@ -28,6 +28,24 @@ export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message:
   }
   return 'sent'
 }
+/** The emoji a receipt reaction adds; fixed in v1, not a setting. */
+export const RECEIPT_EMOJI = 'OK'
+/**
+ * Adds the receipt reaction to a message through Feishu's raw reaction API, rather than the typed `im reactions` shortcut: on
+ * this host the shortcut intermittently returned transport EOF while the raw API path worked.
+ */
+export async function reactFeishu(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
+  const messageId = message.channel.address.messageId
+  if (!messageId) throw new Error('Missing Feishu reaction target')
+  const path = `/open-apis/im/v1/messages/${messageId}/reactions`
+  const data = JSON.stringify({ reaction_type: { emoji_type: RECEIPT_EMOJI } })
+  try { await host.commands.lark(['api', 'POST', path, '--data', data]) }
+  catch (error) {
+    if (gone(error)) return 'gone'
+    throw error
+  }
+  return 'sent'
+}
 /** Fallback chat link on the bot's brand; the message's own deep link on its Trigger is preferred when available. */
 export const feishuLink = (address: Record<string, string>, links: ChannelLinks): ChannelLink => ({
   url: feishuChatLink(links.feishu?.brand ?? 'feishu', address.chatId ?? ''), label: { zh: '飞书消息', en: 'Feishu message' },

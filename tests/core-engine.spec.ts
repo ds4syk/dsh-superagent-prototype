@@ -86,6 +86,27 @@ describe('intake', () => {
     expect(h.repo.threads.get('gh:pr-7')).toMatchObject({ pending: ['1'], correlated: ['gh:run-9'] })
     expect(h.repo.threads.get('gh:run-9')).toMatchObject({ pending: [], correlated: ['gh:pr-7'] })
   })
+  it('queues a receipt reaction for a fresh message that addressed the agent', () => {
+    const h = harness()
+    h.engine.receive(trigger('1', { addressed: 'mention' }))
+    expect(h.outbox).toContainEqual({ id: key('receipt', '1'), channel: trigger('1').channel, text: '', kind: 'reaction',
+      at: '2026-09-23T00:00:01.000Z' })
+  })
+  it('keeps receipt reactions quiet for stale, unaddressed, filtered, bot, and unadmitted messages', () => {
+    const h = harness()
+    h.engine.receive(trigger('1', { addressed: 'mention', at: '2026-09-22T23:00:00.000Z' }))
+    h.engine.receive(trigger('2'))
+    h.engine.receive(trigger('3', { addressed: 'mention', meta: { blocked: true } }))
+    h.engine.receive(trigger('4', { addressed: 'mention', human: false }))
+    h.engine.receive(trigger('5', { addressed: 'mention', actor: guest }))
+    expect(h.outbox.filter(message => message.kind === 'reaction')).toEqual([])
+  })
+  it('queues a receipt reaction for a follow-up on a ticket own thread', () => {
+    const h = harness()
+    accepted(h)
+    h.engine.receive(trigger('2'))
+    expect(h.outbox.filter(message => message.kind === 'reaction').map(message => message.id)).toEqual([key('receipt', '2')])
+  })
 })
 describe('eval', () => {
   it('ignores at the gate without an assessor when nothing is admissible', async () => {

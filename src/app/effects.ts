@@ -21,6 +21,8 @@ export interface EffectPayloads {
   notice: { value: Record<string, unknown>; summary: string }
   /** Send a message for a Channel through its Source; the key is the message ID, whose receipt the Outbox keeps. */
   reply: Record<string, never>
+  /** Add the Source's receipt reaction to a message; the key is the receipt ID the Outbox keeps. */
+  receipt: Record<string, never>
 }
 export type EffectKind = keyof EffectPayloads
 interface Handler<K extends EffectKind> {
